@@ -1,0 +1,336 @@
+---
+title: "HW6"
+author: "Chris Hill"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| echo: false
+#| message: false
+
+library(httr)
+library(tidyverse)
+library(lubridate)
+library(jsonlite)
+
+catch_error <- function(test) {
+  tryCatch(
+    test,
+    error = function(e) {
+      message("Caught error: ", e$message)
+    }
+  )
+}
+```
+
+## Task 1 - Conceptual Questions
+
+1. *What is the purpose of the `lapply()` function? What is the equivalent purrr function?*
+
+    * `lapply()` is a Base R function that takes a list and applies a given function to every element of that list. It then returns a list of equal size.
+    * The purrr package has an equivalent `map()` function. I am familiar with Scala, and so this is more to my liking, personally. Particularly the type checking extensions.
+
+2. *Suppose we have a list called `my_list`. Each element of the list is a numeric data frame (all columns are numeric). We want to use `lapply()` to run the code `cor(numeric_matrix, method = "kendall")` on each element of the list. Write code to do this below! (I’m really trying to ask you how you specify `method = "kendall"` when calling `lapply()`)*
+
+    * The arguments to `cor()` are not fed into `cor()` itself, but are instead provided as additional arguments to `lappy()`
+    
+```{r}
+#| eval: false
+result <- lapply(my_list, cor, method = "kendall")
+```
+
+3. *What are two advantages of using purrr functions instead of the Base R `apply` family?*
+
+    * The first argument to all map functions is always the data. Thus it is "pipable"
+    * `map_*()` allows us to specify the type of output. This provides us with type checking!
+
+4. *What is a side-effect function?*
+
+    *  Side effect effect function doesn't actually try to change the data. It just tries to produce something or alter the environment.
+
+5. *Why can you name a variable `sd` in a function and not cause any issues with the `sd()` function?*
+
+    * Lexical Scoping
+    * Functions actually have temporary function environments.
+
+## Task 2 - Writing R Functions
+
+### 1. Root Mean Square Error (RMSE)
+
+```{r}
+getRMSE <- function(actual, predicted, ...) {
+  sqrt(mean((actual - predicted)^2, ...))
+}
+```
+
+### 2. Test getRMSE()
+
+Simulated Test Data
+
+```{r}
+set.seed(10)
+n <- 100
+x <- runif(n)
+resp <- 3 + 10 * x + rnorm(n)
+pred <- predict(lm(resp ~ x), data.frame(x))
+```
+
+```{r}
+getRMSE(resp, pred)
+```
+
+Inject an NA into the Test Data
+
+```{r}
+resp[c(5, 10)] <- NA_real_
+```
+
+```{r}
+getRMSE(resp, pred)
+```
+
+Use additional arguments to remove NA
+
+```{r}
+getRMSE(resp, pred, na.rm = TRUE)
+```
+
+### 3. Mean Absolute Error (MAE)
+
+```{r}
+getMAE <- function(actual, predicted, ...) {
+  mean(abs(actual - predicted), ...)
+}
+```
+
+### 4. Test getMAE
+
+```{r}
+resp <- 3 + 10 * x + rnorm(n)
+pred <- predict(lm(resp ~ x), data.frame(x))
+```
+
+```{r}
+getMAE(resp, pred)
+```
+
+Inject an NA into the Test Data
+
+```{r}
+resp[c(5, 10)] <- NA_real_
+```
+
+```{r}
+getMAE(resp, pred)
+```
+
+Use additional arguments to remove NA
+
+```{r}
+getMAE(resp, pred, na.rm = TRUE)
+```
+
+### 5. Wrapper for RMSE and MAE
+
+```{r}
+getMetrics <- function(actual, predicted, metrics = c("RMSE", "MAE"), ...) {
+
+  # Validate inputs
+  if (!is.atomic(actual) || !is.atomic(predicted)) {
+    stop("Both inputs must be atomic vectors.")
+  }
+  
+  if (!is.numeric(actual) || !is.numeric(predicted)) {
+    stop("Both inputs must be numeric vectors.")
+  }
+  
+  results <- list()
+  
+  if ("RMSE" %in% metrics) {
+    results$RMSE <- getRMSE(actual, predicted, ...)
+  }
+  
+  if ("MAE" %in% metrics) {
+    results$MAE <- getMAE(actual, predicted, ...)
+  }
+  
+  return(results)
+}
+```
+
+### 6. Test getMetrics()
+
+```{r}
+resp <- 3 + 10 * x + rnorm(n)
+pred <- predict(lm(resp ~ x), data.frame(x))
+```
+
+Test using this data. Call it once asking for each metric individually and once specifying both metrics
+
+```{r}
+getMetrics(resp, pred)
+```
+
+```{r}
+getMetrics(resp, pred, metrics = "RMSE")
+getMetrics(resp, pred, metrics = "MAE")
+```
+
+Inject an NA into the Test Data
+
+```{r}
+resp[c(5, 10)] <- NA_real_
+```
+
+Test using this data. Call it once asking for each metric individually and once specifying both metrics
+
+```{r}
+getMetrics(resp, pred)
+```
+
+```{r}
+getMetrics(resp, pred, metrics = "RMSE")
+getMetrics(resp, pred, metrics = "MAE")
+```
+
+Test function by passing it incorrect data
+
+```{r}
+getMetrics(data.frame(resp), pred) |> catch_error()
+```
+
+## Task 3 - Querying an API and a Tidy-Style Function
+
+### 1. Query API with GET()
+
+```{r}
+api_key <- "d9d2b8e6433e4e2d8364a4dfa5ea23cf"
+base_url <- "https://newsapi.org/v2/everything"
+
+params <- list(
+  q = "technology",    
+  from = "2024-10-01",    
+  apiKey = api_key
+)
+
+response <- GET(base_url, query = params)
+response
+```
+
+### 2. Parse the response
+
+```{r}
+response_content <- fromJSON(rawToChar(response$content), flatten = TRUE)
+
+articles <- pluck(response_content, "articles")
+
+articles_df <- as_tibble(articles)
+articles_df
+```
+
+### 3. Reusable Function
+
+```{r}
+queryNewsAPI <- function(subject, from_date, api_key) {
+  
+  base_url <- "https://newsapi.org/v2/everything"
+  
+  # Can only query 30 days past
+  input_date <- as_date(from_date)
+  max_from_date <- Sys.Date() - 30
+  
+  if (input_date < max_from_date) {
+    warning("Setting the from_date to the 30 day max")
+    from_date <- as.character(max_from_date)
+  }
+  
+  params <- list(
+    q = subject,
+    from = from_date,
+    apiKey = api_key
+  )
+  
+  response <- GET(base_url, query = params)
+  
+  if (http_status(response)$category != "Success") {
+    stop("API Request Failed")
+  }
+  
+  response_content <- fromJSON(rawToChar(response$content), flatten = TRUE)
+  
+  articles <- pluck(response_content, "articles")
+  
+  as_tibble(articles)
+}
+```
+
+```{r}
+tech <- queryNewsAPI("technology", "2024-10-01", api_key)
+tech
+```
+
+```{r}
+health <- queryNewsAPI("health", "2024-10-01", api_key)
+health
+```
+
+### 4. Summarize the source
+
+```{r}
+source_summary <- table(tech$source.name)
+
+source_summary
+```
+
+### 5. publishedAt column
+
+```{r}
+getTimeBetweenArticles <- function(article) {
+  article |>
+    mutate(publishedAt = ymd_hms(publishedAt)) |>  
+    arrange(publishedAt) |>  
+    mutate(pub_diff = publishedAt - lag(publishedAt)) 
+}
+```
+
+```{r}
+my_tech <- tech |> getTimeBetweenArticles()
+
+my_tech |> select(publishedAt, pub_diff, everything())
+```
+
+```{r}
+my_health <- health |> getTimeBetweenArticles()
+
+my_health |> select(publishedAt, pub_diff, everything())
+```
+
+### 6. Subset and Statistics
+
+```{r}
+getPublishedStats <- function(article) {
+  subset <- article |>
+    select(publishedAt, pub_diff)
+  
+  summary_stats <- map(subset, \(x) {
+    c(mean = mean(x, na.rm = TRUE),
+      sd = sd(x, na.rm = TRUE),
+      median = median(x, na.rm = TRUE))
+  })
+  
+  summary_stats
+}
+```
+
+```{r}
+my_tech |> getPublishedStats()
+```
+
+```{r}
+my_health |> getPublishedStats()
+```
+
+
